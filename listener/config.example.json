@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to config.json. Leave webhook_url empty to just log events to stdout/journal; set it to forward each event line as JSON {\"text\": \"...\"} — a chat webhook, Home Assistant, n8n, anything that takes an HTTP POST. immediate_buttons: button numbers sent the instant they are pressed instead of waiting the 10 s combine window (e.g. [3, 7] for start/stop toggles).",
+  "webhook_url": "",
+  "webhook_headers": {},
+  "immediate_buttons": []
+}

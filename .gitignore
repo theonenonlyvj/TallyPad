@@ -1,0 +1,8 @@
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+listener/buttons.json
+listener/config.json
+__pycache__/
+*.pyc
+stock-backup.bin

@@ -1,0 +1,11 @@
+{
+  "_comment": "Button index -> plain-text meaning. Copy to buttons.json and edit freely: the listener re-reads this on every event, so no restart is needed. null = unassigned (a press still makes a record). \"IGNORE\" = the press is dropped and nothing is sent (use it for a test button). Button 9 (sync) is a hardware reset and never posts.",
+  "1": "pee",
+  "2": "issue — ask for details later",
+  "3": null,
+  "4": "a feed took place (details to come later)",
+  "5": "poo",
+  "6": "cloth diaper",
+  "7": null,
+  "8": "a pump happened — volume unknown until details come later"
+}
