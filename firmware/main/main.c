@@ -417,7 +417,7 @@ void app_main(void)
     console_set_nonblocking();
     esp_log_level_set("*", ESP_LOG_ERROR);
 
-    printf("\n\n=== talli-pad v29 (per-button backlight, inverted bits) ===\n");
+    printf("\n\n=== talli-pad v29d (v29 + lamp-pull read diagnostic) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -442,6 +442,24 @@ void app_main(void)
         start_setup_ap();       /* never returns */
     }
     u3_init();                  /* bring the keypad up before the radio */
+    {   /* v29d: do the key inputs read as pressed while the lamps are lit (0x48=0xffff)? No hands needed. */
+        uint16_t v;
+        const struct { uint16_t r2, r48; const char *what; } t[] = {
+            { 0x00ff, 0x0000, "dark      " },
+            { 0x00ff, 0xffff, "0x48 on   " },
+            { (uint16_t)~((1u<<1)|(1u<<9)), 0xffff, "lamp 2 lit" },
+            { 0x0000, 0xffff, "all lit   " },
+            { 0x00ff, 0x0000, "dark again" },
+        };
+        for (int k = 0; k < 3; k++)
+            for (size_t i = 0; i < sizeof(t)/sizeof(t[0]); i++) {
+                u3_wr16(2, t[i].r2); u3_wr16(0x48, t[i].r48);
+                vTaskDelay(pdMS_TO_TICKS(40));
+                v = 0; u3_rd16(0, &v);
+                printf("DIAG %s keys=0x%02x\n", t[i].what, (v >> 8) & 0xff);
+            }
+        u3_wr16(0x48, 0x0000); u3_wr16(2, 0x00ff);
+    }
     leds_init();
     leds_show(-1, 0, 0, 0);     /* all dark */
     if (!start_sta(ssid, pass)) {
