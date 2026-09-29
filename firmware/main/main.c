@@ -28,7 +28,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -48,14 +48,17 @@ static const char *TAG = "talli-pad";
 #define INGEST_URL "http://192.168.1.50:4180/press"  /* CHANGE ME: your listener's LAN address */
 #define LED_PIN 10               /* stock: pinMode(10,OUTPUT)+low = WS2812 chain */
 #define LED_COUNT 9
-#define POLL_MS 30               /* keypad poll; the chip light-sleeps between polls */
-#define LISTEN_INTERVAL 10       /* wake for every 10th Wi-Fi beacon (~1 s) */
+#define POLL_MS 30
 #define WIFI_DOWN_BLINK_MS 5000  /* one short red blink this often while Wi-Fi is down */
+#define AWAKE_AFTER_PRESS_MS 20000    /* stay up for combos and follow-up presses */
+#define AWAKE_AFTER_COLDBOOT_MS 120000 /* USB plug / flash / reset: time for the console */
+#define SLEEP_TIMER_US 1800000000ULL   /* stock value: 30 min safety wake */
 
 static nvs_handle_t g_nvs;
 static bool g_nvs_ok;
 static bool g_wifi_up;
 static volatile bool g_want_reconnect;
+static uint16_t g_batch;          /* v31: buttons gathered while waking */
 static esp_err_t u3_wr16(uint8_t reg, uint16_t val);
 static esp_err_t u3_rd16(uint8_t reg, uint16_t *out);
 static void status_green(void);
@@ -78,12 +81,15 @@ static void console_set_nonblocking(void)
     if (flags >= 0) fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 }
 
+static bool g_console_active;
+
 static void poll_console(void)
 {
     static char line[16];
     static size_t len = 0;
     uint8_t ch;
     if (read(STDIN_FILENO, &ch, 1) != 1) return;
+    g_console_active = true;
     if (ch == '\r' || ch == '\n') {
         line[len] = '\0';
         len = 0;
@@ -122,6 +128,14 @@ static void poll_console(void)
     }
     if (len < sizeof(line) - 1) line[len++] = (char)ch;
     else len = 0;
+}
+
+/* v31: someone typing on the console keeps the pad awake */
+static bool poll_console_activity(void)
+{
+    g_console_active = false;
+    poll_console();
+    return g_console_active;
 }
 
 static void boot_console_window(void)
@@ -285,38 +299,29 @@ static bool start_sta(const char *ssid, const char *pass)
     wifi_config_t sta = { 0 };
     strncpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid) - 1);
     strncpy((char *)sta.sta.password, pass, sizeof(sta.sta.password) - 1);
-    sta.sta.listen_interval = LISTEN_INTERVAL;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
     ESP_ERROR_CHECK(esp_wifi_start());
     printf("joining '%s'...\n", ssid);
     for (int i = 0; i < 300 && !g_wifi_up; i++) {
         poll_console();
+        if (g_batch) {          /* v31: presses while joining join the batch */
+            uint16_t v = 0;
+            if (u3_rd16(0, &v) == ESP_OK && ((v >> 8) & 0xff & ~g_batch)) {
+                g_batch |= (v >> 8) & 0xff;
+                uint16_t lamps = 0;
+                for (int b = 0; b < 8; b++)
+                    if (g_batch & (1u << b)) lamps |= (uint16_t)((1u << b) | (1u << (b + 8)));
+                u3_wr16(2, (uint16_t)~lamps);
+                u3_wr16(0x48, 0xffff);
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (g_wifi_up) printf("wifi up\n");
     return g_wifi_up;
 }
 
-/* v30 power saving. v29 ran the CPU and radio flat out and kept the status
- * LED lit, which emptied fresh AA cells in under two days (2026-09-29).
- * Auto light sleep: the CPU sleeps between keypad polls, the radio wakes
- * only for every LISTEN_INTERVAL-th beacon. Enabled after the boot console
- * window, so the 'dl' wire-reflash route is unchanged (UART input is not
- * read while asleep). */
-static void power_save_start(void)
-{
-    esp_pm_config_t pm = {
-        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
-        .min_freq_mhz = 40,
-        .light_sleep_enable = true,
-    };
-    esp_err_t e = esp_pm_configure(&pm);
-    esp_err_t w = esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
-    printf("power save: light sleep %s, wifi max-modem %s\n",
-           e == ESP_OK ? "on" : esp_err_to_name(e),
-           w == ESP_OK ? "on" : esp_err_to_name(w));
-}
 
 /* ---------------------------- WS2812 button LEDs --------------------------- */
 
@@ -406,6 +411,8 @@ static void led_flash(int button, bool ok)
         u3_wr16(2, 0x00ff);   /* stock init value; 0x48=0 keeps lamps dark */
         status_off();           /* v30: idle is dark */
     } else {
+        u3_wr16(0x48, 0x0000);  /* v31: drop any wake-time white lamp */
+        u3_wr16(2, 0x00ff);
         for (int i = 0; i < 2; i++) {
             status_red(); vTaskDelay(pdMS_TO_TICKS(150));
             status_off(); vTaskDelay(pdMS_TO_TICKS(150));
@@ -413,9 +420,45 @@ static void led_flash(int button, bool ok)
     }
 }
 
+/* ------------------------------ deep sleep ---------------------------------- */
+
+static void u3_wr8(uint8_t reg, uint8_t val)
+{
+    uint8_t buf[2] = { reg, val };
+    i2c_master_write_to_device(I2C_PORT, U3_ADDR, buf, 2, pdMS_TO_TICKS(50));
+}
+
+/* v31: sleep the way the stock firmware does. Its SleepState (disassembly of
+ * the original image, function at 0x420002a0) writes U3 reg 0x02 = 0xff
+ * (lamps off), reg 0x44 = 0xff00 (latch the button inputs), reg 0x4A =
+ * 0x00ff (unmask the button interrupts), sets GPIO10 to input, then calls
+ * esp_deep_sleep(1800000000 us). No GPIO wake source is configured, so a
+ * press restarts the chip through the board and the latched U3 input tells
+ * the firmware which button it was. The radio is off the whole time. */
+static void deep_sleep_now(void)
+{
+    printf("sleeping: radio off, wake on press (safety timer %llu s)\n",
+           SLEEP_TIMER_US / 1000000ULL);
+    esp_wifi_stop();
+    leds_show(-1, 0, 0, 0);
+    status_off();
+    uint16_t junk;
+    u3_rd16(0x4C, &junk);           /* clear anything pending */
+    u3_rd16(0x00, &junk);
+    u3_wr8(0x02, 0xff);
+    u3_wr16(0x44, 0xff00);
+    u3_wr16(0x4A, 0x00ff);
+    gpio_reset_pin(LED_PIN);
+    gpio_set_direction(LED_PIN, GPIO_MODE_INPUT);
+    gpio_hold_en(GPIO_NUM_20);      /* keep the status LED off while asleep */
+    gpio_hold_en(GPIO_NUM_21);
+    vTaskDelay(pdMS_TO_TICKS(20));  /* let the console drain */
+    esp_deep_sleep(SLEEP_TIMER_US);
+}
+
 /* ------------------------------ press posting ------------------------------ */
 
-static void post_press(int button)
+static bool post_press_quiet(int button)
 {
     char body[32];
     snprintf(body, sizeof(body), "{\"button\": %d}", button);
@@ -432,7 +475,34 @@ static void post_press(int button)
     printf("press %d -> POST %s (http %d)\n", button,
            err == ESP_OK ? "ok" : esp_err_to_name(err), code);
     esp_http_client_cleanup(c);
-    led_flash(button, err == ESP_OK && code == 200);
+    return err == ESP_OK && code == 200;
+}
+
+static void post_press(int button)
+{
+    led_flash(button, post_press_quiet(button));
+}
+
+/* v31: the buttons that woke the pad were lit white together; send them all,
+ * then one shared result - green with all their lamps, or red blinks. */
+static void post_wake_batch(uint16_t latched)
+{
+    bool all_ok = true;
+    for (int b = 0; b < 8; b++) {
+        if (!(latched & (1u << b))) continue;
+        printf("button %d pressed (woke the pad)\n", b + 1);
+        if (!g_wifi_up) { printf("  (wifi down — press dropped)\n"); all_ok = false; }
+        else if (!post_press_quiet(b + 1)) all_ok = false;
+    }
+    if (all_ok) {
+        status_green();
+        vTaskDelay(pdMS_TO_TICKS(350));
+        u3_wr16(0x48, 0x0000);
+        u3_wr16(2, 0x00ff);
+        status_off();
+    } else {
+        led_flash(0, false);
+    }
 }
 
 /* ---------------------------------- main ----------------------------------- */
@@ -444,7 +514,11 @@ void app_main(void)
     console_set_nonblocking();
     esp_log_level_set("*", ESP_LOG_ERROR);
 
-    printf("\n\n=== TallyPad v30 (power save: light sleep, modem sleep, dark idle) ===\n");
+    gpio_hold_dis(GPIO_NUM_20);
+    gpio_hold_dis(GPIO_NUM_21);
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+    printf("\n\n=== TallyPad v31 (deep sleep between presses, stock-style) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -454,7 +528,20 @@ void app_main(void)
     g_nvs_ok = (err == ESP_OK &&
                 nvs_open("talli", NVS_READWRITE, &g_nvs) == ESP_OK);
 
-    boot_console_window();
+    /* Which button woke us: U3's interrupt status plus its latched input. */
+    u3_init();
+    uint16_t st = 0, in = 0;
+    u3_rd16(0x4C, &st);
+    u3_rd16(0x00, &in);
+    uint16_t latched = (uint16_t)(((st | in) >> 8) & 0xff);
+    printf("wake: cause %d, reset %d, latched buttons 0x%02x\n",
+           (int)cause, (int)esp_reset_reason(), latched);
+
+    if (!latched && cause == ESP_SLEEP_WAKEUP_TIMER) {
+        printf("safety-timer wake with no press\n");
+        deep_sleep_now();
+    }
+    if (!latched) boot_console_window();   /* cold boot keeps the 'dl' route */
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -468,19 +555,31 @@ void app_main(void)
     if (!have) {
         start_setup_ap();       /* never returns */
     }
-    u3_init();                  /* bring the keypad up before the radio */
     leds_init();
     leds_show(-1, 0, 0, 0);     /* all dark */
-    if (!start_sta(ssid, pass)) {
-        printf("could not join '%s' in 30 s — keeping trying in background\n",
-               ssid);
+    if (latched) {
+        /* v31: light the pressed button(s) white right away, while Wi-Fi
+         * joins; led_flash() adds the green (sent) or red (failed) after. */
+        uint16_t lamps = 0;
+        for (int b = 0; b < 8; b++)
+            if (latched & (1u << b)) lamps |= (uint16_t)((1u << b) | (1u << (b + 8)));
+        u3_wr16(2, (uint16_t)~lamps);
+        u3_wr16(0x48, 0xffff);
+        g_batch = latched;
     }
+    if (!start_sta(ssid, pass)) {
+        printf("could not join '%s' in 30 s\n", ssid);
+    }
+    status_off();
 
-    power_save_start();
-    status_off();               /* v30: dark at idle; presses still flash */
+    if (g_batch) post_wake_batch(g_batch);
+    { uint16_t v = 0; if (u3_rd16(0, &v) == ESP_OK) in = v; }  /* don't re-send held buttons */
+
+    int64_t awake_until = esp_timer_get_time() + (int64_t)1000 *
+        (latched ? AWAKE_AFTER_PRESS_MS : AWAKE_AFTER_COLDBOOT_MS);
 
     printf("--- watching buttons ---\n");
-    uint16_t prev = 0;
+    uint16_t prev = in;
     int stable = 0;
     while (1) {
         uint16_t v = 0;
@@ -499,6 +598,8 @@ void app_main(void)
                         }
                     }
                 }
+                awake_until = esp_timer_get_time() +
+                              (int64_t)AWAKE_AFTER_PRESS_MS * 1000;
             }
             prev = v;
             stable = 0;
@@ -508,8 +609,6 @@ void app_main(void)
             u3_init();
             stable = 0;
         }
-        /* v30: no steady status light (it drew current around the clock).
-         * Wi-Fi up = dark; Wi-Fi down = one short red blink every 5 s. */
         static int64_t next_blink_us = 0;
         if (!g_wifi_up) {
             int64_t now = esp_timer_get_time();
@@ -525,7 +624,11 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(500));
             esp_wifi_connect();
         }
-        poll_console();
+        if (poll_console_activity()) {
+            awake_until = esp_timer_get_time() +
+                          (int64_t)AWAKE_AFTER_COLDBOOT_MS * 1000;
+        }
+        if (esp_timer_get_time() >= awake_until) deep_sleep_now();
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 }
