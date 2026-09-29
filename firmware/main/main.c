@@ -45,7 +45,15 @@ static const char *TAG = "talli-pad";
 #define I2C_PORT I2C_NUM_0
 #define U3_ADDR 0x20
 #define BOOT_WINDOW_MS 6000
+/* Your own settings go in main/local_config.h (git-ignored), e.g.
+ *   #define INGEST_URL "http://192.168.1.50:4180/press"
+ * so the tracked source never needs editing and stays the one copy. */
+#if __has_include("local_config.h")
+#include "local_config.h"
+#endif
+#ifndef INGEST_URL
 #define INGEST_URL "http://192.168.1.50:4180/press"  /* CHANGE ME: your listener's LAN address */
+#endif
 #define LED_PIN 10               /* stock: pinMode(10,OUTPUT)+low = WS2812 chain */
 #define LED_COUNT 9
 #define POLL_MS 30

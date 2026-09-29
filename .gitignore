@@ -6,3 +6,4 @@ listener/config.json
 __pycache__/
 *.pyc
 stock-backup.bin
+firmware/main/local_config.h
