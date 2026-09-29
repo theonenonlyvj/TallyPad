@@ -28,6 +28,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_pm.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -47,6 +48,9 @@ static const char *TAG = "talli-pad";
 #define INGEST_URL "http://192.168.1.50:4180/press"  /* CHANGE ME: your listener's LAN address */
 #define LED_PIN 10               /* stock: pinMode(10,OUTPUT)+low = WS2812 chain */
 #define LED_COUNT 9
+#define POLL_MS 30               /* keypad poll; the chip light-sleeps between polls */
+#define LISTEN_INTERVAL 10       /* wake for every 10th Wi-Fi beacon (~1 s) */
+#define WIFI_DOWN_BLINK_MS 5000  /* one short red blink this often while Wi-Fi is down */
 
 static nvs_handle_t g_nvs;
 static bool g_nvs_ok;
@@ -281,6 +285,7 @@ static bool start_sta(const char *ssid, const char *pass)
     wifi_config_t sta = { 0 };
     strncpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid) - 1);
     strncpy((char *)sta.sta.password, pass, sizeof(sta.sta.password) - 1);
+    sta.sta.listen_interval = LISTEN_INTERVAL;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -291,6 +296,26 @@ static bool start_sta(const char *ssid, const char *pass)
     }
     if (g_wifi_up) printf("wifi up\n");
     return g_wifi_up;
+}
+
+/* v30 power saving. v29 ran the CPU and radio flat out and kept the status
+ * LED lit, which emptied fresh AA cells in under two days (2026-09-29).
+ * Auto light sleep: the CPU sleeps between keypad polls, the radio wakes
+ * only for every LISTEN_INTERVAL-th beacon. Enabled after the boot console
+ * window, so the 'dl' wire-reflash route is unchanged (UART input is not
+ * read while asleep). */
+static void power_save_start(void)
+{
+    esp_pm_config_t pm = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = true,
+    };
+    esp_err_t e = esp_pm_configure(&pm);
+    esp_err_t w = esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+    printf("power save: light sleep %s, wifi max-modem %s\n",
+           e == ESP_OK ? "on" : esp_err_to_name(e),
+           w == ESP_OK ? "on" : esp_err_to_name(w));
 }
 
 /* ---------------------------- WS2812 button LEDs --------------------------- */
@@ -320,7 +345,8 @@ static void leds_init(void)
         printf("LED: encoder failed\n");
         return;
     }
-    rmt_enable(g_led_chan);
+    /* v30: the RMT channel holds a max-CPU power lock while enabled, which
+     * would block light sleep forever; leds_show() enables it per frame. */
     gpio_reset_pin(GPIO_NUM_20);
     gpio_set_direction(GPIO_NUM_20, GPIO_MODE_OUTPUT);
     gpio_set_level(GPIO_NUM_20, 1);
@@ -340,9 +366,11 @@ static void leds_show(int index, uint8_t r, uint8_t g, uint8_t b)
         buf[index * 3 + 2] = b;
     }
     rmt_transmit_config_t tc = { .loop_count = 0 };
+    if (rmt_enable(g_led_chan) != ESP_OK) return;
     if (rmt_transmit(g_led_chan, g_led_enc, buf, sizeof(buf), &tc) == ESP_OK) {
         rmt_tx_wait_all_done(g_led_chan, 100);
     }
+    rmt_disable(g_led_chan);
     esp_rom_delay_us(300);         /* WS2812 latch gap */
 }
 
@@ -376,8 +404,7 @@ static void led_flash(int button, bool ok)
         vTaskDelay(pdMS_TO_TICKS(350));
         u3_wr16(0x48, 0x0000);
         u3_wr16(2, 0x00ff);   /* stock init value; 0x48=0 keeps lamps dark */
-        status_off();
-        /* main loop restores steady green/red from wifi state */
+        status_off();           /* v30: idle is dark */
     } else {
         for (int i = 0; i < 2; i++) {
             status_red(); vTaskDelay(pdMS_TO_TICKS(150));
@@ -417,7 +444,7 @@ void app_main(void)
     console_set_nonblocking();
     esp_log_level_set("*", ESP_LOG_ERROR);
 
-    printf("\n\n=== talli-pad v29 (per-button backlight, inverted bits) ===\n");
+    printf("\n\n=== TallyPad v30 (power save: light sleep, modem sleep, dark idle) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -449,6 +476,9 @@ void app_main(void)
                ssid);
     }
 
+    power_save_start();
+    status_off();               /* v30: dark at idle; presses still flash */
+
     printf("--- watching buttons ---\n");
     uint16_t prev = 0;
     int stable = 0;
@@ -478,10 +508,17 @@ void app_main(void)
             u3_init();
             stable = 0;
         }
-        static int shown_up = -1;
-        if ((int)g_wifi_up != shown_up) {
-            shown_up = (int)g_wifi_up;
-            if (g_wifi_up) status_green(); else status_red();
+        /* v30: no steady status light (it drew current around the clock).
+         * Wi-Fi up = dark; Wi-Fi down = one short red blink every 5 s. */
+        static int64_t next_blink_us = 0;
+        if (!g_wifi_up) {
+            int64_t now = esp_timer_get_time();
+            if (now >= next_blink_us) {
+                status_red();
+                vTaskDelay(pdMS_TO_TICKS(60));
+                status_off();
+                next_blink_us = now + (int64_t)WIFI_DOWN_BLINK_MS * 1000;
+            }
         }
         if (g_want_reconnect) {
             g_want_reconnect = false;
@@ -489,6 +526,6 @@ void app_main(void)
             esp_wifi_connect();
         }
         poll_console();
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 }
