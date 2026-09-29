@@ -417,7 +417,7 @@ void app_main(void)
     console_set_nonblocking();
     esp_log_level_set("*", ESP_LOG_ERROR);
 
-    printf("\n\n=== talli-pad v29 (per-button backlight, inverted bits) ===\n");
+    printf("\n\n=== talli-pad v29e (v29 + key settle-time diagnostic) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -442,6 +442,41 @@ void app_main(void)
         start_setup_ap();       /* never returns */
     }
     u3_init();                  /* bring the keypad up before the radio */
+    {   /* v29e: how long do the keys take to read clean after the lamp gate (0x48) goes off,
+         * and do stock-style lamp writes (reg 2 only, 0x48 = 0) disturb the keys? */
+        static const int at_us[] = { 0, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000 };
+        uint16_t v;
+        for (int k = 0; k < 3; k++) {
+            u3_wr16(2, (uint16_t)~((1u<<1)|(1u<<9))); u3_wr16(0x48, 0xffff);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            u3_wr16(0x48, 0x0000); u3_wr16(2, 0x00ff);
+            int64_t t0 = esp_timer_get_time();
+            printf("DIAGE off->");
+            for (size_t i = 0; i < sizeof(at_us)/sizeof(at_us[0]); i++) {
+                while (esp_timer_get_time() - t0 < at_us[i]) { }
+                v = 0; u3_rd16(0, &v);
+                printf(" %dus=%02x", at_us[i], (v >> 8) & 0xff);
+            }
+            printf("\n");
+            t0 = esp_timer_get_time(); u3_wr16(0x48, 0xffff);
+            printf("DIAGE on->");
+            for (size_t i = 0; i < 6; i++) {
+                while (esp_timer_get_time() - t0 < at_us[i]) { }
+                v = 0; u3_rd16(0, &v);
+                printf(" %dus=%02x", at_us[i], (v >> 8) & 0xff);
+            }
+            printf("\n");
+            u3_wr16(0x48, 0x0000); u3_wr16(2, 0x00ff);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        const uint16_t stock[] = { 0xfffd, 0x0000, 0xff00, 0xffff, 0x00ff };
+        for (size_t i = 0; i < 5; i++) {
+            u3_wr16(2, stock[i]); vTaskDelay(pdMS_TO_TICKS(50));
+            v = 0; u3_rd16(0, &v);
+            printf("DIAGE stock reg2=%04x 0x48=0 keys=%02x\n", stock[i], (v >> 8) & 0xff);
+        }
+        u3_wr16(2, 0x00ff);
+    }
     leds_init();
     leds_show(-1, 0, 0, 0);     /* all dark */
     if (!start_sta(ssid, pass)) {
