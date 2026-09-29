@@ -303,13 +303,15 @@ not affiliated with Talli or BabyLogger.
 listener instead of the Talli cloud. To go back, write your backup:
 `esptool.py --chip esp32c6 write-flash 0x0 stock-backup.bin` (after Step 7).
 
-**Batteries or USB?** USB is safest. Since v30 the firmware saves power:
-the chip light-sleeps between button checks, the Wi-Fi radio wakes only
-for every 10th router beacon, and the status light stays dark when idle
-(one short red blink every 5 seconds means Wi-Fi is down). The earlier
-always-on firmware emptied fresh AA cells in under two days. How long
-batteries last on v30 has not been measured yet. Full deep sleep (radio
-off between presses) is a possible next step; pull requests welcome.
+**Batteries or USB?** Either. Since v31 the firmware copies the stock
+power design: between presses the chip is in deep sleep with the Wi-Fi
+radio off, and a press wakes it. The pressed buttons light white right
+away, the pad joins Wi-Fi and sends them, then one green flash means sent
+and red blinks mean something failed. It also wakes every 30 minutes on
+a safety timer and goes straight back to sleep if nothing was pressed.
+The trade-off is a short delay after the first press while Wi-Fi
+reconnects. The earlier always-on firmware emptied fresh AA cells in
+under two days; how long batteries last on v31 has not been measured yet.
 
 **Does anything go to the internet?** Only what you send there yourself
 with `webhook_url`. The pad talks to your listener on your home network.

@@ -85,6 +85,7 @@ which is the moral of the story: **disassemble first, probe second.**
 ## Power
 
 Wi-Fi permanently associated draws enough that 4×AA cells last days, not
-months (the stock firmware deep-sleeps between presses and pays for it with
-slow wake). Keep it on USB power, or contribute a deep-sleep + fast-connect
-mode.
+months. The stock firmware deep-sleeps between presses: it sets U3 to latch
+the button port and unmasks its interrupt, then calls `esp_deep_sleep` with
+a 30-minute timer. A press brings the chip back up and the firmware reads
+the latched buttons on boot. Firmware v31 does the same.
