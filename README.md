@@ -309,10 +309,12 @@ radio off, and a press wakes it. The pressed buttons light white right
 away, the pad joins Wi-Fi and sends them, then one green flash means sent
 and red blinks mean something failed. It also wakes every 30 minutes on
 a safety timer and goes straight back to sleep if nothing was pressed.
-v31 had a bug: after a wake, one press could repeat across every
-button, because U3's input latch stayed on. v32 turns the latch off once
-it has read which button woke the pad; v32 has not been run on hardware
-yet. If you want the proven always-on behaviour, build commit 0ce3910.
+v31 and v32 had a bug: after a wake, one press could turn into presses
+on every button. The real cause (measured on the pad): while any button
+lamp is lit, all eight keys read as pressed, and those versions read the
+keys during Wi-Fi join with the wake lamp lit. v33 reads the keys only
+with the lamps briefly dark. v33 has not been run on hardware yet. If you
+want the proven always-on behaviour, build tag v29.
 The trade-off is a short delay after the first press while Wi-Fi
 reconnects. The earlier always-on firmware emptied fresh AA cells in
 under two days; how long batteries last on v31 has not been measured yet.

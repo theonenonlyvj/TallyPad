@@ -315,7 +315,15 @@ static bool start_sta(const char *ssid, const char *pass)
         poll_console();
         if (g_batch) {          /* v31: presses while joining join the batch */
             uint16_t v = 0;
-            if (u3_rd16(0, &v) == ESP_OK && ((v >> 8) & 0xff & ~g_batch)) {
+            /* v33: with any lamp lit (reg 0x48 on) every key reads as pressed
+             * (proven on the pad 09-29 with v29d: 0x00 dark, 0xff lit, 3/3).
+             * v31/v32 read the keys here with the wake lamp lit, so one press
+             * became all eight. Read only with the lamps briefly dark. */
+            u3_wr16(0x48, 0x0000);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            esp_err_t rd = u3_rd16(0, &v);
+            u3_wr16(0x48, 0xffff);
+            if (rd == ESP_OK && ((v >> 8) & 0xff & ~g_batch)) {
                 g_batch |= (v >> 8) & 0xff;
                 uint16_t lamps = 0;
                 for (int b = 0; b < 8; b++)
@@ -526,7 +534,7 @@ void app_main(void)
     gpio_hold_dis(GPIO_NUM_21);
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
-    printf("\n\n=== TallyPad v32 (deep sleep; input latch cleared on wake) ===\n");
+    printf("\n\n=== TallyPad v33 (deep sleep; keys read only with lamps dark) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
