@@ -518,7 +518,7 @@ void app_main(void)
     gpio_hold_dis(GPIO_NUM_21);
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
-    printf("\n\n=== TallyPad v31 (deep sleep between presses, stock-style) ===\n");
+    printf("\n\n=== TallyPad v32 (deep sleep; input latch cleared on wake) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -534,6 +534,14 @@ void app_main(void)
     u3_rd16(0x4C, &st);
     u3_rd16(0x00, &in);
     uint16_t latched = (uint16_t)(((st | in) >> 8) & 0xff);
+    /* v32: the sleep sequence turned U3's input latch on (0x44 = 0xff00) and
+     * U3 keeps it across the ESP's deep sleep. v31 never turned it off, so
+     * while awake every glitch a lamp write put on a key was latched and read
+     * as a press: one real press chased through all eight buttons. Now that the wake button is read, go back to v29's
+     * unlatched, masked inputs and drop anything latched meanwhile. */
+    u3_wr16(0x44, 0x0000);
+    u3_wr16(0x4A, 0xff00);
+    { uint16_t junk; u3_rd16(0x4C, &junk); u3_rd16(0x00, &junk); }
     printf("wake: cause %d, reset %d, latched buttons 0x%02x\n",
            (int)cause, (int)esp_reset_reason(), latched);
 
