@@ -318,9 +318,10 @@ static bool start_sta(const char *ssid, const char *pass)
             /* v33: with any lamp lit (reg 0x48 on) every key reads as pressed
              * (proven on the pad 09-29 with v29d: 0x00 dark, 0xff lit, 3/3).
              * v31/v32 read the keys here with the wake lamp lit, so one press
-             * became all eight. Read only with the lamps briefly dark. */
+             * became all eight. Read only with the lamps briefly dark; the
+             * keys read clean immediately after the gate drops (v29e diag:
+             * 0x00 at 0 us, 3 of 3), so the dark gap is one I2C read long. */
             u3_wr16(0x48, 0x0000);
-            vTaskDelay(pdMS_TO_TICKS(10));
             esp_err_t rd = u3_rd16(0, &v);
             u3_wr16(0x48, 0xffff);
             if (rd == ESP_OK && ((v >> 8) & 0xff & ~g_batch)) {
@@ -534,7 +535,7 @@ void app_main(void)
     gpio_hold_dis(GPIO_NUM_21);
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
-    printf("\n\n=== TallyPad v33 (deep sleep; keys read only with lamps dark) ===\n");
+    printf("\n\n=== TallyPad v34 (deep sleep; keys read only with lamps dark) ===\n");
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
