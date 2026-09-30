@@ -33,6 +33,7 @@ spreadsheet through n8n or Zapier, Node-RED, or just a log.
 - [FAQ](#faq)
 - [How it works (hardware)](#how-it-works-hardware)
 - [How this was reverse engineered](#how-this-was-reverse-engineered)
+- [Making your own changes](docs/DEVELOPING.md)
 - [Safety, legality, warranty](#safety-legality-warranty)
 
 ---
@@ -93,12 +94,15 @@ address so it never changes.
 
 ### Step 4. Put that address into the firmware
 
-Open `firmware/main/main.c` in any text editor and change this one line to
-your address (keep `:4180/press` on the end):
+Copy `firmware/main/local_config.h.example` to `firmware/main/local_config.h`
+and change the address to yours (keep `:4180/press` on the end):
 
 ```c
 #define INGEST_URL "http://192.168.1.23:4180/press"
 ```
+
+`local_config.h` is git-ignored, so your address never ends up in a commit
+and `git pull` never conflicts with it.
 
 ### Step 5. Build the firmware
 
@@ -338,7 +342,9 @@ cable), and **U3, an I²C keypad/LED expander at address `0x20`** (SDA =
 GPIO22, SCL = GPIO23) that owns the 8 buttons and their white backlights.
 Register 0 bits 8 to 15 are buttons 1 to 8 in reading order (active high);
 register 2 is per-lamp control (**active-low**); register `0x48` is a
-brightness gate that must be nonzero or nothing ever lights. The 9th
+brightness gate that must be nonzero or nothing ever lights. ⚠️ **While
+`0x48` is on, all eight buttons read as pressed.** Only read the buttons
+with it off (see [`docs/DEVELOPING.md`](docs/DEVELOPING.md)). The 9th
 ("sync") button is wired into power/reset. The status LED is a WS2812-style
 addressable LED on GPIO10.
 
@@ -357,6 +363,7 @@ Full pinout, register map, and dead ends: [`docs/hardware.md`](docs/hardware.md)
 - `listener/`: `ingest.py` (plain Python 3, no extra packages), example
   settings, a systemd unit, and tests (`python3 -m unittest test_ingest.py`).
 - `tools/flash.sh`: reflash over the cable with no hands on the board.
+- `tools/bench-sink.py`: a stand-in listener for testing new builds safely.
 - `docs/`: hardware notes and the IO9 photo.
 
 ---
@@ -377,6 +384,16 @@ datasheet for U3 (its `L16A / ZSD332A` marking matches nothing public):
 4. The backlights fell to three presses: one lit everything (the brightness
    gate `0x48`), one lit every lamp *except* the pressed one (register 2 is
    active-low), and the third lit exactly the right lamp.
+5. Battery life came from copying the stock deep sleep. The first two
+   sleep builds (v31, v32) turned one press into presses on every button.
+   Listing every register the stock firmware writes showed it never raises
+   `0x48`; two small diagnostic builds then measured that `0x48` forces all
+   keys to read pressed, instantly and every time. v34 reads keys only with
+   it off, and passed a hands-on test first sent to a bench sink.
+
+**Want to change the firmware yourself?** The full workflow (versions,
+diagnostic builds, disassembly, bench testing, flashing) is in
+[`docs/DEVELOPING.md`](docs/DEVELOPING.md).
 
 ---
 

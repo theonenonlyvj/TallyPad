@@ -28,6 +28,20 @@ because there isn't one public.
 | `0x00` (16-bit) | Key state. Bits 8–15 = buttons 1–8 in reading order (top row left→right, then bottom row), **active HIGH**. Press and release both update it; polling at 30 Hz is plenty and bounce-free. | Nine-press capture run, each press one clean bit, in press order. |
 | `0x02` (16-bit) | Per-lamp white backlight control, **ACTIVE-LOW** (clear a bit to light a lamp). The byte order was never fully isolated, so the firmware clears the button's bit in both bytes — harmless and correct either way. | Setting the pressed button's bit lit every lamp *except* it (a perfect complement image ⇒ inverted logic). |
 | `0x48` (16-bit) | Global brightness gate. `0x0000` = everything dark regardless of reg 2 (the stock idle state); `0xffff` = full. Write this nonzero or nothing ever lights. | Every single-register attempt lit nothing until a cumulative register hunt crossed this one and all lamps came on. |
+| `0x48` side effect | **While `0x48` is nonzero, every key in reg `0x00` reads as pressed (`0xff`).** It flips at once both ways: `0x00` at 0 µs after it drops, `0xff` at 0 µs after it rises. Read keys only with `0x48 = 0`. | Diagnostic builds v29d and v29e, 3 of 3 rounds each. |
+
+Every U3 write in the stock firmware (from the disassembly), for reference:
+
+| When | Writes |
+|---|---|
+| Init | `0x4F=0x0001`, `0x06=0xff00` (byte 1 = inputs), `0x46=0xff00`, `0x48=0x0000`, `0x4A=0xff00` (interrupts masked), `0x02=0x00ff` |
+| Lamps | `0x02` only: `~pressed_mask` to light the pressed buttons, `0x0000`/`0x00ff` to blink all. **Stock never raises `0x48`**, which is why it can read keys while lamps are lit. |
+| Before deep sleep | `0x02=0x00ff`, `0x44=0xff00` (latch the key inputs), `0x4A=0x00ff` (unmask key interrupts), then `esp_deep_sleep(30 min)` |
+| Key poll | read `0x00`, OR `(value >> 8)` into the pressed mask |
+
+Our lamp method (`0x48` on) came first and is what the firmware still uses.
+Whether stock-style `0x02`-only lamps are visibly lit on this board hasn't
+been checked by eye; if they are, `0x48` can be dropped entirely.
 
 The firmware's boot console keeps raw access for exploring further:
 `w<reg><val16>` writes, `r<reg>` reads (hex).
@@ -88,4 +102,6 @@ Wi-Fi permanently associated draws enough that 4×AA cells last days, not
 months. The stock firmware deep-sleeps between presses: it sets U3 to latch
 the button port and unmasks its interrupt, then calls `esp_deep_sleep` with
 a 30-minute timer. A press brings the chip back up and the firmware reads
-the latched buttons on boot. Firmware v31 does the same.
+the latched buttons on boot. TallyPad does the same since v31; **v34** is
+the first sleep build that's correct (v31 and v32 read keys with `0x48` on
+and turned one press into eight). Battery life on v34 is not measured yet.
